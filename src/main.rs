@@ -8,9 +8,12 @@ use serde::{self, Serialize};
 use sha1::{Digest, Sha1};
 use std::collections::BTreeMap;
 
+use crate::bencode::ParseError;
+
 mod bencode {
     type ByteString = Vec<u8>;
 
+    #[derive(Clone)]
     pub enum BencodeValue {
         Integer(i64),
         String(ByteString),
@@ -31,6 +34,38 @@ mod bencode {
             }
 
             Ok(value)
+        }
+
+        pub fn as_integer(&self) -> Result<i64, ParseError> {
+            if let BencodeValue::Integer(x) = self {
+                Ok(x.clone())
+            } else {
+                Err(ParseError::Fail)
+            }
+        }
+
+        pub fn as_byte_string(&self) -> Result<ByteString, ParseError> {
+            if let BencodeValue::String(s) = self {
+                Ok(s.clone())
+            } else {
+                Err(ParseError::Fail)
+            }
+        }
+
+        pub fn as_vec(&self) -> Result<Vec<Self>, ParseError> {
+            if let BencodeValue::List(v) = self {
+                Ok(v.clone())
+            } else {
+                Err(ParseError::Fail)
+            }
+        }
+
+        pub fn as_dict(&self) -> Result<std::collections::BTreeMap<ByteString, Self>, ParseError> {
+            if let BencodeValue::Dict(dict) = self {
+                Ok(dict.clone())
+            } else {
+                Err(ParseError::Fail)
+            }
         }
     }
 
@@ -166,9 +201,43 @@ mod bencode {
             _ => Err(ParseError::Fail),
         }
     }
+
+    pub fn encode(val: &BencodeValue) -> Vec<u8> {
+        match val {
+            BencodeValue::Integer(x) => format!("i{x}e").into_bytes(),
+            BencodeValue::String(s) => {
+                let mut v = format!("{}:", s.len()).into_bytes();
+                v.extend(s);
+                v
+            }
+            BencodeValue::List(v) => {
+                let mut result: Vec<u8> = vec![];
+                result.push(b'l');
+                for x in v.iter() {
+                    result.extend_from_slice(&encode(x));
+                }
+                result.push(b'e');
+                result
+            }
+            BencodeValue::Dict(d) => {
+                let mut result: Vec<u8> = vec![];
+                result.push(b'd');
+
+                for k in d.keys() {
+                    result.extend_from_slice(&encode(&BencodeValue::String(k.clone())));
+
+                    result.extend_from_slice(&encode(d.get(k).unwrap()));
+                }
+                result.push(b'e');
+                result
+            }
+        }
+    }
 }
 
 mod torrent {
+    use super::bencode;
+
     pub struct Torrent {
         pub announce: String,
         pub info: Info,
@@ -179,63 +248,7 @@ mod torrent {
         pub name: String,
         pub piece_length: i64,
         pub pieces: Vec<u8>,
-    }
-}
-
-fn torrentInfo_to_bencodevalue(info: &torrent::Info) -> bencode::BencodeValue {
-    let mut result = BTreeMap::new();
-
-    result.insert(
-        "length".to_string().into_bytes(),
-        bencode::BencodeValue::Integer(info.length),
-    );
-    result.insert(
-        "name".to_string().into_bytes(),
-        bencode::BencodeValue::String(info.name.clone().into_bytes()),
-    );
-    result.insert(
-        "piece length".to_string().into_bytes(),
-        bencode::BencodeValue::Integer(info.piece_length),
-    );
-    result.insert(
-        "pieces".to_string().into_bytes(),
-        bencode::BencodeValue::String(info.pieces.clone()),
-    );
-
-    bencode::BencodeValue::Dict(result)
-}
-
-fn bencode(val: &bencode::BencodeValue) -> Vec<u8> {
-    match val {
-        bencode::BencodeValue::Integer(x) => format!("i{x}e").into_bytes(),
-        bencode::BencodeValue::String(s) => {
-            let mut v = format!("{}:", s.len()).into_bytes();
-            v.extend(s);
-            v
-        }
-        bencode::BencodeValue::List(v) => {
-            let mut result: Vec<u8> = vec![];
-            result.push(b'l');
-            for x in v.iter() {
-                result.extend_from_slice(&bencode(x));
-            }
-            result.push(b'e');
-            result
-        }
-        bencode::BencodeValue::Dict(d) => {
-            let mut result: Vec<u8> = vec![];
-            result.push(b'd');
-            let mut keys: Vec<&Vec<u8>> = d.keys().collect();
-            keys.sort();
-
-            for k in keys {
-                result.extend_from_slice(&bencode(&bencode::BencodeValue::String(k.clone())));
-
-                result.extend_from_slice(&bencode(d.get(k).unwrap()));
-            }
-            result.push(b'e');
-            result
-        }
+        pub hash: String,
     }
 }
 
@@ -273,56 +286,48 @@ fn decode_bencoded_value(encoded_value: &[u8]) -> serde_json::Value {
     }
 }
 
-fn parse_torrent(content: &[u8]) -> Result<torrent::Torrent, String> {
-    let (parsed, _) =
-        bencode::parse_value(content).map_err(|_| "Failed to parse the torrent file")?;
-    let bencode::BencodeValue::Dict(dict) = &parsed else {
-        return Err("Torrent file should be a bencoded dictionary".into());
-    };
-
-    let bencode::BencodeValue::String(announce) = dict
+fn parse_torrent(content: &[u8]) -> Result<torrent::Torrent, ParseError> {
+    let parsed = bencode::BencodeValue::from_bytes(content)?;
+    let dict = parsed.as_dict()?;
+    let announce = dict
         .get(&"announce".to_string().into_bytes())
-        .ok_or("couldn't find 'announce' as a key")?
-    else {
-        return Err("'announce' was not a valid bencoded string".into());
-    };
-    let bencode::BencodeValue::Dict(info) = &dict
+        .ok_or(ParseError::Fail)?
+        .as_byte_string()?;
+    let info = dict
         .get(&"info".to_string().into_bytes())
-        .ok_or("couldn't find 'info' as a key")?
-    else {
-        return Err("info' was not a valid bencoded dict".into());
-    };
-    let bencode::BencodeValue::Integer(length) = &info
+        .ok_or(ParseError::Fail)?
+        .as_dict()?;
+
+    let length = info
         .get(&"length".to_string().into_bytes())
-        .ok_or("couldn't find 'length' as a key")?
-    else {
-        return Err("length' was not a valid bencoded integer".into());
-    };
-    let bencode::BencodeValue::String(name) = &info
+        .ok_or(ParseError::Fail)?
+        .as_integer()?;
+
+    let name = info
         .get(&"name".to_string().into_bytes())
-        .ok_or("couldn't find 'name' as a key")?
-    else {
-        return Err("name' was not a valid bencoded string".into());
-    };
-    let bencode::BencodeValue::Integer(piece_length) = &info
+        .ok_or(ParseError::Fail)?
+        .as_byte_string()?;
+
+    let piece_length = info
         .get(&"piece length".to_string().into_bytes())
-        .ok_or("couldn't find 'piece length' as a key")?
-    else {
-        return Err("piece length' was not a valid bencoded integer".into());
-    };
-    let bencode::BencodeValue::String(pieces) = &info
+        .ok_or(ParseError::Fail)?
+        .as_integer()?;
+
+    let pieces = info
         .get(&"pieces".to_string().into_bytes())
-        .ok_or("couldn't find 'pieces' as a key")?
-    else {
-        return Err("pieces' was not a valid bencoded string".into());
-    };
+        .ok_or(ParseError::Fail)?
+        .as_byte_string()?;
+
     Ok(torrent::Torrent {
-        announce: String::from_utf8(announce.clone()).map_err(|e| e.to_string())?,
+        announce: String::from_utf8(announce.clone()).map_err(|_| ParseError::Fail)?,
         info: torrent::Info {
-            length: length.clone(),
-            name: String::from_utf8(name.clone()).map_err(|e| e.to_string())?,
-            piece_length: piece_length.clone(),
-            pieces: pieces.clone(),
+            length: length,
+            name: String::from_utf8(name).map_err(|_| ParseError::Fail)?,
+            piece_length: piece_length,
+            pieces: pieces,
+            hash: hex::encode(Sha1::digest(bencode::encode(&bencode::BencodeValue::Dict(
+                info,
+            )))),
         },
     })
 }
@@ -342,16 +347,12 @@ fn main() {
         eprintln!("Logs:");
         let filename = &args[2];
         let torrent_file = std::fs::read(filename).expect("File not found");
-        let parsed_torrent = parse_torrent(&torrent_file).unwrap_or_else(|e| panic!("{}", e));
+        let parsed_torrent =
+            parse_torrent(&torrent_file).unwrap_or_else(|e| panic!("Couldn't parse torrent"));
 
         println!("Tracked URL: {}", parsed_torrent.announce);
         println!("Length: {}", parsed_torrent.info.length);
-        println!(
-            "Info Hash: {}",
-            hex::encode(Sha1::digest(bencode(&torrentInfo_to_bencodevalue(
-                &parsed_torrent.info
-            ))))
-        );
+        println!("Info Hash: {}", parsed_torrent.info.hash);
     } else {
         println!("unknown command: {}", args[1]);
     }
