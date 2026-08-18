@@ -1,19 +1,46 @@
-use std::fmt;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum ParseError {
-    Fail(String),
-}
+    #[error("unexpected end of input")]
+    UnexpectedEof,
 
-impl fmt::Display for ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ParseError::Fail(msg) => write!(f, "unable to parse from/into Bencoded value: {}", msg),
-        }
-    }
-}
+    #[error("missing delimiter '{delimiter}'")]
+    MissingDelimiter { delimiter: char },
 
-impl std::error::Error for ParseError {}
+    #[error("invalid integer: {reason}")]
+    InvalidInteger { reason: String },
+
+    #[error("invalid UTF-8: {0}")]
+    InvalidUtf8(#[from] std::str::Utf8Error),
+
+    #[error("byte string data too short")]
+    ShortInput,
+
+    #[error("unconsumed data after parsing")]
+    TrailingData,
+
+    #[error("expected {expected}, got {actual}")]
+    TypeMismatch {
+        expected: &'static str,
+        actual: &'static str,
+    },
+
+    #[error("dict key is not a byte string")]
+    InvalidDictKey,
+
+    #[error("dict keys are not sorted")]
+    UnsortedKeys,
+
+    #[error("unknown bencode type: '{0}'")]
+    UnknownType(char),
+
+    #[error("failed to parse list element")]
+    InvalidListElement,
+
+    #[error("failed to parse dict value")]
+    InvalidDictValue,
+}
 
 type ByteString = Vec<u8>;
 
@@ -29,41 +56,35 @@ impl BencodeValue {
     pub fn convert(&self) -> serde_json::Value {
         match self {
             Self::Integer(x) => (*x).into(),
-
             Self::String(s) => (*s).clone().into(),
-
-            Self::List(v) => serde_json::Value::Array(v.into_iter().map(Self::convert).collect()),
-
+            Self::List(v) => serde_json::Value::Array(v.iter().map(Self::convert).collect()),
             Self::Dict(kv) => {
                 let mut result = serde_json::Map::new();
-
                 for (k, v) in kv {
-                    let key = String::from_utf8(k.clone())
-                        .unwrap_or_else(|_| panic!("malformed encoded value"))
-                        .to_string();
-
+                    let key = String::from_utf8_lossy(k).to_string();
                     result.insert(key, Self::convert(v));
                 }
-
                 serde_json::Value::Object(result)
             }
         }
     }
+
     pub fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
         let (value, remainder) = parse_value(input)?;
-
         if !remainder.is_empty() {
-            return Err(ParseError::Fail("from_bytes failed".into()));
+            return Err(ParseError::TrailingData);
         }
-
         Ok(value)
     }
 
     pub fn as_integer(&self) -> Result<i64, ParseError> {
         if let BencodeValue::Integer(x) = self {
-            Ok(x.clone())
+            Ok(*x)
         } else {
-            Err(ParseError::Fail("as_integer failed".into()))
+            Err(ParseError::TypeMismatch {
+                expected: "integer",
+                actual: self.type_name(),
+            })
         }
     }
 
@@ -71,7 +92,10 @@ impl BencodeValue {
         if let BencodeValue::String(s) = self {
             Ok(s.clone())
         } else {
-            Err(ParseError::Fail("as_byte_string failed".into()))
+            Err(ParseError::TypeMismatch {
+                expected: "byte string",
+                actual: self.type_name(),
+            })
         }
     }
 
@@ -79,15 +103,32 @@ impl BencodeValue {
         if let BencodeValue::List(v) = self {
             Ok(v.clone())
         } else {
-            Err(ParseError::Fail("as_vec failed".into()))
+            Err(ParseError::TypeMismatch {
+                expected: "list",
+                actual: self.type_name(),
+            })
         }
     }
 
-    pub fn as_dict(&self) -> Result<std::collections::BTreeMap<ByteString, Self>, ParseError> {
+    pub fn as_dict(
+        &self,
+    ) -> Result<std::collections::BTreeMap<ByteString, Self>, ParseError> {
         if let BencodeValue::Dict(dict) = self {
             Ok(dict.clone())
         } else {
-            Err(ParseError::Fail("as_dict failed".into()))
+            Err(ParseError::TypeMismatch {
+                expected: "dict",
+                actual: self.type_name(),
+            })
+        }
+    }
+
+    fn type_name(&self) -> &'static str {
+        match self {
+            BencodeValue::Integer(_) => "integer",
+            BencodeValue::String(_) => "byte string",
+            BencodeValue::List(_) => "list",
+            BencodeValue::Dict(_) => "dict",
         }
     }
 }
@@ -97,11 +138,11 @@ fn parse_integer(input: &[u8]) -> Option<i64> {
         b"0" => Some(0),
         s => {
             let (is_negative, digits) = s
-                .strip_prefix(&[b'-'])
-                .and_then(|s| Some((true, s)))
-                .unwrap_or_else(|| (false, s));
+                .strip_prefix(b"-")
+                .map(|s| (true, s))
+                .unwrap_or((false, s));
 
-            if digits.is_empty() || digits.starts_with(&[b'0']) {
+            if digits.is_empty() || digits.starts_with(b"0") {
                 None
             } else {
                 str::from_utf8(digits)
@@ -118,28 +159,27 @@ pub fn parse_value(input: &[u8]) -> Result<(BencodeValue, &[u8]), ParseError> {
     match input
         .iter()
         .next()
-        .ok_or(ParseError::Fail("input is empty".into()))?
+        .ok_or(ParseError::UnexpectedEof)?
     {
         b'0'..=b'9' => {
             let colon_idx = input
                 .iter()
                 .position(|&c| c == b':')
-                .ok_or(ParseError::Fail("colon not found in byte string".into()))?;
+                .ok_or(ParseError::MissingDelimiter { delimiter: ':' })?;
 
-            let len = std::str::from_utf8(&input[..colon_idx])
-                .map_err(|_| ParseError::Fail("byte string length not valid utf8".into()))?
+            let len = std::str::from_utf8(&input[..colon_idx])?
                 .parse::<usize>()
-                .map_err(|_| ParseError::Fail("byte string length not a number".into()))?;
-
-            println!("{}", len);
+                .map_err(|e| ParseError::InvalidInteger {
+                    reason: e.to_string(),
+                })?;
 
             let (byte_string, rest) = (
                 input
                     .get(colon_idx + 1..colon_idx + 1 + len)
-                    .ok_or(ParseError::Fail("byte string too short".into()))?,
-                input.get(colon_idx + 1 + len..).ok_or(ParseError::Fail(
-                    "missing remainder after byte string".into(),
-                ))?,
+                    .ok_or(ParseError::ShortInput)?,
+                input
+                    .get(colon_idx + 1 + len..)
+                    .ok_or(ParseError::UnexpectedEof)?,
             );
 
             Ok((BencodeValue::String(byte_string.to_owned()), rest))
@@ -149,28 +189,26 @@ pub fn parse_value(input: &[u8]) -> Result<(BencodeValue, &[u8]), ParseError> {
             let end_idx = input
                 .iter()
                 .position(|&c| c == b'e')
-                .ok_or(ParseError::Fail("integer missing 'e' terminator".into()))?;
+                .ok_or(ParseError::MissingDelimiter { delimiter: 'e' })?;
             let body = &input[1..end_idx];
 
             let rem = input
                 .get(end_idx + 1..)
-                .ok_or(ParseError::Fail("missing remainder after integer".into()))?;
+                .ok_or(ParseError::UnexpectedEof)?;
 
             parse_integer(body)
                 .map(|x| (BencodeValue::Integer(x), rem))
-                .ok_or(ParseError::Fail("invalid integer body".into()))
+                .ok_or_else(|| ParseError::InvalidInteger {
+                    reason: format!("invalid integer body: {}", String::from_utf8_lossy(body)),
+                })
         }
 
         b'l' => {
             let mut v: Vec<BencodeValue> = vec![];
-            let mut input = input
-                .strip_prefix(&[b'l'])
-                .ok_or(ParseError::Fail("missing 'l' prefix for list".into()))?;
+            let mut input = input.strip_prefix(b"l").unwrap();
 
-            if input.starts_with(&[b'e']) {
-                input = input
-                    .strip_prefix(&[b'e'])
-                    .ok_or(ParseError::Fail("missing 'e' to close empty list".into()))?;
+            if input.starts_with(b"e") {
+                input = input.strip_prefix(b"e").unwrap();
                 return Ok((BencodeValue::List(v), input));
             }
 
@@ -181,14 +219,12 @@ pub fn parse_value(input: &[u8]) -> Result<(BencodeValue, &[u8]), ParseError> {
                     input = rem;
                     v.push(val);
 
-                    if input.starts_with(&[b'e']) {
-                        rest = input
-                            .strip_prefix(&[b'e'])
-                            .ok_or(ParseError::Fail("missing 'e' to close list".into()))?;
+                    if input.starts_with(b"e") {
+                        rest = input.strip_prefix(b"e").unwrap();
                         break;
                     }
                 } else {
-                    return Err(ParseError::Fail("failed to parse list element".into()));
+                    return Err(ParseError::InvalidListElement);
                 }
             }
 
@@ -199,14 +235,10 @@ pub fn parse_value(input: &[u8]) -> Result<(BencodeValue, &[u8]), ParseError> {
             let mut keys = vec![];
             let mut kv = std::collections::BTreeMap::new();
 
-            let mut input = input
-                .strip_prefix(&[b'd'])
-                .ok_or(ParseError::Fail("missing 'd' prefix for dict".into()))?;
+            let mut input = input.strip_prefix(b"d").unwrap();
 
-            if input.starts_with(&[b'e']) {
-                input = input
-                    .strip_prefix(&[b'e'])
-                    .ok_or(ParseError::Fail("missing 'e' to close empty dict".into()))?;
+            if input.starts_with(b"e") {
+                input = input.strip_prefix(b"e").unwrap();
                 return Ok((BencodeValue::Dict(kv), input));
             }
 
@@ -222,29 +254,26 @@ pub fn parse_value(input: &[u8]) -> Result<(BencodeValue, &[u8]), ParseError> {
                         keys.push(k.clone());
                         kv.insert(k.clone(), v);
 
-                        if input.starts_with(&[b'e']) {
-                            rest = input
-                                .strip_prefix(&[b'e'])
-                                .ok_or(ParseError::Fail("missing 'e' to close dict".into()))?;
+                        if input.starts_with(b"e") {
+                            rest = input.strip_prefix(b"e").unwrap();
                             break;
                         }
                     } else {
-                        return Err(ParseError::Fail("failed to parse dict value".into()));
+                        return Err(ParseError::InvalidDictValue);
                     }
                 } else {
-                    println!("{}", String::from_utf8_lossy(input));
-                    return Err(ParseError::Fail("dict key is not a byte string".into()));
+                    return Err(ParseError::InvalidDictKey);
                 }
             }
 
             if !keys.is_sorted() {
-                Err(ParseError::Fail("dict keys not sorted".into()))
+                Err(ParseError::UnsortedKeys)
             } else {
                 Ok((BencodeValue::Dict(kv), rest))
             }
         }
 
-        _ => Err(ParseError::Fail("unknown bencode type".into())),
+        other => Err(ParseError::UnknownType(*other as char)),
     }
 }
 
@@ -268,11 +297,9 @@ pub fn encode(val: &BencodeValue) -> Vec<u8> {
         BencodeValue::Dict(d) => {
             let mut result: Vec<u8> = vec![];
             result.push(b'd');
-
-            for k in d.keys() {
+            for (k, v) in d {
                 result.extend_from_slice(&encode(&BencodeValue::String(k.clone())));
-
-                result.extend_from_slice(&encode(d.get(k).unwrap()));
+                result.extend_from_slice(&encode(v));
             }
             result.push(b'e');
             result

@@ -3,41 +3,50 @@ mod torrent;
 
 use std::env;
 
-fn decode_bencoded_value(encoded_value: &[u8]) -> serde_json::Value {
-    if let Ok((val, _)) = bencode::parse_value(encoded_value) {
-        val.convert()
-    } else {
-        panic!("malformed encoded value");
-    }
+use anyhow::{Context, Result};
+
+fn decode_bencoded_value(encoded_value: &[u8]) -> Result<serde_json::Value> {
+    let (val, _) = bencode::parse_value(encoded_value).context("failed to parse bencode")?;
+    Ok(val.convert())
 }
 
-fn main() {
+fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
-    let command = &args[1];
+
+    let command = args
+        .get(1)
+        .context("usage: rustorrent <decode|info|peers> <input>")?;
 
     if command == "decode" {
         eprintln!("Logs:");
-
-        let encoded_value = &args[2];
-        let decoded_value = decode_bencoded_value(&encoded_value.clone().into_bytes());
-
-        println!("{}", decoded_value.to_string());
+        let encoded_value = args
+            .get(2)
+            .context("usage: rustorrent decode <encoded_value>")?;
+        let decoded_value = decode_bencoded_value(encoded_value.as_bytes())?;
+        println!("{}", decoded_value);
     } else if command == "info" {
         eprintln!("Logs:");
-        let filename = &args[2];
-        let torrent_file = std::fs::read(filename).expect("File not found");
+        let filename = args
+            .get(2)
+            .context("usage: rustorrent info <filename>")?;
+        let torrent_file =
+            std::fs::read(filename).context(format!("failed to read {filename}"))?;
         let parsed_torrent =
-            torrent::from_bytes(&torrent_file).unwrap_or_else(|_| panic!("Couldn't parse torrent"));
-
+            torrent::from_bytes(&torrent_file).context("failed to parse torrent file")?;
         println!("{:#?}", parsed_torrent);
     } else if command == "peers" {
         eprintln!("Logs:");
-        let filename = &args[2];
-        let torrent_file = std::fs::read(filename).expect("File not found");
+        let filename = args
+            .get(2)
+            .context("usage: rustorrent peers <filename>")?;
+        let torrent_file =
+            std::fs::read(filename).context(format!("failed to read {filename}"))?;
         let parsed_torrent =
-            torrent::from_bytes(&torrent_file).unwrap_or_else(|_| panic!("Couldn't parse torrent"));
-        parsed_torrent.get_peers_from_tracker().unwrap();
+            torrent::from_bytes(&torrent_file).context("failed to parse torrent file")?;
+        parsed_torrent.get_peers_from_tracker()?;
     } else {
-        println!("unknown command: {}", args[1]);
+        anyhow::bail!("unknown command: {command}\nusage: rustorrent <decode|info|peers> <input>");
     }
+
+    Ok(())
 }

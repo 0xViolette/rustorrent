@@ -1,11 +1,9 @@
+use anyhow::{Context, Result};
 use reqwest::{self, Url};
 use sha1::{Digest, Sha1};
 use std::fmt;
-use std::net::SocketAddr;
-use urlencoding;
 
-use crate::bencode::ParseError;
-use crate::{bencode, decode_bencoded_value};
+use crate::bencode::{self, BencodeValue};
 
 pub struct Torrent {
     pub announce: String,
@@ -32,58 +30,66 @@ impl fmt::Debug for Torrent {
     }
 }
 
-pub fn from_bytes(bytes: &[u8]) -> Result<Torrent, ParseError> {
-    let parsed = bencode::BencodeValue::from_bytes(bytes)?;
-    let dict = parsed.as_dict()?;
+pub fn from_bytes(bytes: &[u8]) -> Result<Torrent> {
+    let parsed = bencode::BencodeValue::from_bytes(bytes).context("failed to parse bencode")?;
+    let dict = parsed.as_dict().context("top-level value is not a dict")?;
+
     let announce = dict
-        .get(&"announce".to_string().into_bytes())
-        .ok_or(ParseError::Fail("announce key not found".into()))?
-        .as_byte_string()?;
+        .get(&b"announce"[..])
+        .context("missing 'announce' key")?
+        .as_byte_string()
+        .context("'announce' is not a byte string")?;
+
     let info = dict
-        .get(&"info".to_string().into_bytes())
-        .ok_or(ParseError::Fail("info key not found".into()))?
-        .as_dict()?;
+        .get(&b"info"[..])
+        .context("missing 'info' key")?
+        .as_dict()
+        .context("'info' is not a dict")?;
 
     let length: u64 = info
-        .get(&"length".to_string().into_bytes())
-        .ok_or(ParseError::Fail("length key not found".into()))?
-        .as_integer()?
-        .cast_unsigned();
+        .get(&b"length"[..])
+        .context("missing 'length' key in info")?
+        .as_integer()
+        .context("'length' is not an integer")?
+        .try_into()
+        .context("'length' is negative")?;
 
     let name = info
-        .get(&"name".to_string().into_bytes())
-        .ok_or(ParseError::Fail("name key not found".into()))?
-        .as_byte_string()?;
+        .get(&b"name"[..])
+        .context("missing 'name' key in info")?
+        .as_byte_string()
+        .context("'name' is not a byte string")?;
 
     let piece_length = info
-        .get(&"piece length".to_string().into_bytes())
-        .ok_or(ParseError::Fail("piece length key not found".into()))?
-        .as_integer()?;
+        .get(&b"piece length"[..])
+        .context("missing 'piece length' key in info")?
+        .as_integer()
+        .context("'piece length' is not an integer")?;
 
     let pieces: Vec<String> = info
-        .get(&"pieces".to_string().into_bytes())
-        .ok_or(ParseError::Fail("pieces key not found".into()))?
-        .as_byte_string()?
+        .get(&b"pieces"[..])
+        .context("missing 'pieces' key in info")?
+        .as_byte_string()
+        .context("'pieces' is not a byte string")?
         .chunks(20)
         .map(|x| {
             x.try_into()
-                .map_err(|_| ParseError::Fail("piece not 20 bytes".into()))
+                .map_err(|_| anyhow::anyhow!("piece hash is not 20 bytes"))
         })
-        .collect::<Result<Vec<[u8; 20]>, ParseError>>()?
+        .collect::<Result<Vec<[u8; 20]>>>()?
         .iter()
-        .map(|x| hex::encode(x))
+        .map(hex::encode)
         .collect();
 
     Ok(Torrent {
-        announce: String::from_utf8(announce.clone())
-            .map_err(|_| ParseError::Fail("announce not valid utf8".into()))?,
+        announce: String::from_utf8(announce)
+            .context("'announce' is not valid UTF-8")?,
         info: Info {
-            length: length.into(),
-            name: String::from_utf8(name)
-                .map_err(|_| ParseError::Fail("name not valid utf8".into()))?,
-            piece_length: piece_length,
-            pieces: pieces,
-            hash: Sha1::digest(bencode::encode(&bencode::BencodeValue::Dict(info))).to_vec(),
+            length,
+            name: String::from_utf8(name).context("'name' is not valid UTF-8")?,
+            piece_length,
+            pieces,
+            hash: Sha1::digest(bencode::encode(&BencodeValue::Dict(info))).to_vec(),
         },
     })
 }
@@ -124,7 +130,7 @@ impl<'a> TrackerRequest<'a> {
 }
 
 impl Torrent {
-    pub fn get_peers_from_tracker(&self) -> anyhow::Result<()> {
+    pub fn get_peers_from_tracker(&self) -> Result<()> {
         let peer_id = b"\x19\x01\xees\xbd?\xed\x81\x82Vw\xcb\x94\xdd\x87(\x05\xe9\xa2G";
         let req_params = TrackerRequest {
             info_hash: &self.info.hash,
@@ -136,11 +142,17 @@ impl Torrent {
             port: 6881,
         };
 
-        let mut url = Url::parse(&self.announce)?;
+        let mut url = Url::parse(&self.announce).context("invalid tracker URL")?;
         url.set_query(Some(&req_params.to_query()));
 
-        let resp = reqwest::blocking::get(url)?.bytes()?;
-        let (decoded_resp, _) = bencode::parse_value(&resp)?;
+        let resp = reqwest::blocking::get(url)
+            .context("failed to contact tracker")?
+            .bytes()
+            .context("failed to read tracker response")?;
+
+        let (decoded_resp, _) =
+            bencode::parse_value(&resp).context("failed to parse tracker response")?;
+
         println!("{:#?}", decoded_resp.convert().to_string());
         Ok(())
     }
