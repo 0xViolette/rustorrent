@@ -35,8 +35,6 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Torrent> {
     let parsed = bencode::BencodeValue::from_bytes(bytes).context("failed to parse bencode")?;
     let dict = parsed.as_dict().context("top-level value is not a dict")?;
 
-    println!("dict: {:?}", parsed);
-
     let announce = dict
         .get(&b"announce"[..])
         .context("missing 'announce' key")?
