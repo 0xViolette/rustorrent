@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use reqwest::{self, Url};
 use sha1::{Digest, Sha1};
-use std::fmt;
+use std::{fmt, net::SocketAddrV4};
 
 use crate::bencode::{self, BencodeValue};
 
@@ -11,9 +11,10 @@ pub struct Torrent {
 }
 
 pub struct Info {
-    pub length: u64,
+    pub length: usize,
+    #[allow(unused)]
     pub name: String,
-    pub piece_length: i64,
+    pub piece_length: usize,
     pub pieces: Vec<String>,
     pub hash: Vec<u8>,
 }
@@ -46,7 +47,7 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Torrent> {
         .as_dict()
         .context("'info' is not a dict")?;
 
-    let length: u64 = info
+    let length: usize = info
         .get(&b"length"[..])
         .context("missing 'length' key in info")?
         .as_integer()
@@ -60,11 +61,13 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Torrent> {
         .as_byte_string()
         .context("'name' is not a byte string")?;
 
-    let piece_length = info
+    let piece_length: usize = info
         .get(&b"piece length"[..])
         .context("missing 'piece length' key in info")?
         .as_integer()
-        .context("'piece length' is not an integer")?;
+        .context("'piece length' is not an integer")?
+        .try_into()
+        .context("'piece length' is negative")?;
 
     let pieces: Vec<String> = info
         .get(&b"pieces"[..])
@@ -82,8 +85,7 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Torrent> {
         .collect();
 
     Ok(Torrent {
-        announce: String::from_utf8(announce)
-            .context("'announce' is not valid UTF-8")?,
+        announce: String::from_utf8(announce).context("'announce' is not valid UTF-8")?,
         info: Info {
             length,
             name: String::from_utf8(name).context("'name' is not valid UTF-8")?,
@@ -94,23 +96,19 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Torrent> {
     })
 }
 
-struct Peer {
-    ip: String,
-    port: u16,
-}
-
-struct TrackerResponse {
-    interval: i64,
-    peers: Vec<String>,
+pub struct TrackerResponse {
+    #[allow(unused)]
+    pub interval: usize,
+    pub peers: Vec<std::net::SocketAddrV4>,
 }
 
 struct TrackerRequest<'a> {
     info_hash: &'a [u8],
     peer_id: &'a [u8],
     port: u16,
-    uploaded: u64,
-    downloaded: u64,
-    left: u64,
+    uploaded: usize,
+    downloaded: usize,
+    left: usize,
     compact: u8,
 }
 
@@ -130,7 +128,7 @@ impl<'a> TrackerRequest<'a> {
 }
 
 impl Torrent {
-    pub fn get_peers_from_tracker(&self) -> Result<()> {
+    pub fn get_peers_from_tracker(&self) -> Result<TrackerResponse> {
         let peer_id = b"\x19\x01\xees\xbd?\xed\x81\x82Vw\xcb\x94\xdd\x87(\x05\xe9\xa2G";
         let req_params = TrackerRequest {
             info_hash: &self.info.hash,
@@ -150,10 +148,32 @@ impl Torrent {
             .bytes()
             .context("failed to read tracker response")?;
 
-        let (decoded_resp, _) =
-            bencode::parse_value(&resp).context("failed to parse tracker response")?;
+        if let (BencodeValue::Dict(decoded_resp), _) =
+            bencode::parse_value(&resp).context("failed to parse tracker response")?
+        {
+            let interval: usize = decoded_resp
+                .get(&b"interval"[..])
+                .ok_or(anyhow::anyhow!("`interval` key not found in dictionary"))?
+                .as_integer()?
+                .try_into()?;
 
-        println!("{:#?}", decoded_resp.convert().to_string());
-        Ok(())
+            let peers = decoded_resp
+                .get(&b"peers"[..])
+                .ok_or(anyhow::anyhow!("`peers` key not found in dictionary"))?
+                .as_byte_string()?
+                .chunks_exact(6)
+                .filter(|x| x.len() == 6)
+                .map(|x| {
+                    std::net::SocketAddrV4::new(
+                        std::net::Ipv4Addr::new(x[0], x[1], x[2], x[3]),
+                        u16::from_be_bytes([x[4], x[5]]),
+                    )
+                })
+                .collect::<Vec<SocketAddrV4>>();
+
+            Ok(TrackerResponse { interval, peers })
+        } else {
+            anyhow::bail!("Expected response to be a bencoded dictionary");
+        }
     }
 }

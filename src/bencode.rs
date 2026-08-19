@@ -99,6 +99,7 @@ impl BencodeValue {
         }
     }
 
+    #[allow(dead_code)]
     pub fn as_vec(&self) -> Result<Vec<Self>, ParseError> {
         if let BencodeValue::List(v) = self {
             Ok(v.clone())
@@ -110,9 +111,7 @@ impl BencodeValue {
         }
     }
 
-    pub fn as_dict(
-        &self,
-    ) -> Result<std::collections::BTreeMap<ByteString, Self>, ParseError> {
+    pub fn as_dict(&self) -> Result<std::collections::BTreeMap<ByteString, Self>, ParseError> {
         if let BencodeValue::Dict(dict) = self {
             Ok(dict.clone())
         } else {
@@ -156,11 +155,7 @@ fn parse_integer(input: &[u8]) -> Option<i64> {
 }
 
 pub fn parse_value(input: &[u8]) -> Result<(BencodeValue, &[u8]), ParseError> {
-    match input
-        .iter()
-        .next()
-        .ok_or(ParseError::UnexpectedEof)?
-    {
+    match input.iter().next().ok_or(ParseError::UnexpectedEof)? {
         b'0'..=b'9' => {
             let colon_idx = input
                 .iter()
@@ -192,9 +187,7 @@ pub fn parse_value(input: &[u8]) -> Result<(BencodeValue, &[u8]), ParseError> {
                 .ok_or(ParseError::MissingDelimiter { delimiter: 'e' })?;
             let body = &input[1..end_idx];
 
-            let rem = input
-                .get(end_idx + 1..)
-                .ok_or(ParseError::UnexpectedEof)?;
+            let rem = input.get(end_idx + 1..).ok_or(ParseError::UnexpectedEof)?;
 
             parse_integer(body)
                 .map(|x| (BencodeValue::Integer(x), rem))
@@ -267,10 +260,25 @@ pub fn parse_value(input: &[u8]) -> Result<(BencodeValue, &[u8]), ParseError> {
             }
 
             if !keys.is_sorted() {
+                // println!(
+                //     "keys: {:?}",
+                //     keys.iter()
+                //         .map(|bytes| String::from_utf8_lossy(bytes).to_string())
+                //         .collect::<Vec<String>>()
+                // );
+                println!("{:#?}", BencodeValue::Dict(kv).convert().to_string());
                 Err(ParseError::UnsortedKeys)
             } else {
+                // println!(
+                //     "keys: {:?}",
+                //     keys.iter()
+                //         .map(|bytes| String::from_utf8_lossy(bytes).to_string())
+                //         .collect::<Vec<String>>()
+                // );
                 Ok((BencodeValue::Dict(kv), rest))
             }
+
+            //Ok((BencodeValue::Dict(kv), rest))
         }
 
         other => Err(ParseError::UnknownType(*other as char)),
@@ -305,4 +313,9 @@ pub fn encode(val: &BencodeValue) -> Vec<u8> {
             result
         }
     }
+}
+
+#[allow(dead_code)]
+pub fn decode(input: &[u8]) -> Result<BencodeValue, ParseError> {
+    parse_value(input).map(|x| x.0)
 }
