@@ -1,3 +1,5 @@
+use std::fmt;
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -44,7 +46,7 @@ pub enum ParseError {
 
 type ByteString = Vec<u8>;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum BencodeValue {
     Integer(i64),
     String(ByteString),
@@ -52,17 +54,25 @@ pub enum BencodeValue {
     Dict(std::collections::BTreeMap<ByteString, BencodeValue>),
 }
 
+impl fmt::Debug for BencodeValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.convert_to_serde())
+    }
+}
+
 impl BencodeValue {
-    pub fn convert(&self) -> serde_json::Value {
+    fn convert_to_serde(&self) -> serde_json::Value {
         match self {
             Self::Integer(x) => (*x).into(),
-            Self::String(s) => (*s).clone().into(),
-            Self::List(v) => serde_json::Value::Array(v.iter().map(Self::convert).collect()),
+            Self::String(s) => String::from_utf8_lossy(s).to_string().into(),
+            Self::List(v) => {
+                serde_json::Value::Array(v.iter().map(Self::convert_to_serde).collect())
+            }
             Self::Dict(kv) => {
                 let mut result = serde_json::Map::new();
                 for (k, v) in kv {
                     let key = String::from_utf8_lossy(k).to_string();
-                    result.insert(key, Self::convert(v));
+                    result.insert(key, Self::convert_to_serde(v));
                 }
                 serde_json::Value::Object(result)
             }
@@ -77,9 +87,9 @@ impl BencodeValue {
         Ok(value)
     }
 
-    pub fn as_integer(&self) -> Result<i64, ParseError> {
+    pub fn as_integer(&self) -> Result<&i64, ParseError> {
         if let BencodeValue::Integer(x) = self {
-            Ok(*x)
+            Ok(x)
         } else {
             Err(ParseError::TypeMismatch {
                 expected: "integer",
@@ -88,9 +98,9 @@ impl BencodeValue {
         }
     }
 
-    pub fn as_byte_string(&self) -> Result<ByteString, ParseError> {
+    pub fn as_byte_string(&self) -> Result<&ByteString, ParseError> {
         if let BencodeValue::String(s) = self {
-            Ok(s.clone())
+            Ok(s)
         } else {
             Err(ParseError::TypeMismatch {
                 expected: "byte string",
@@ -100,9 +110,9 @@ impl BencodeValue {
     }
 
     #[allow(dead_code)]
-    pub fn as_vec(&self) -> Result<Vec<Self>, ParseError> {
+    pub fn as_vec(&self) -> Result<&Vec<Self>, ParseError> {
         if let BencodeValue::List(v) = self {
-            Ok(v.clone())
+            Ok(v)
         } else {
             Err(ParseError::TypeMismatch {
                 expected: "list",
@@ -111,9 +121,9 @@ impl BencodeValue {
         }
     }
 
-    pub fn as_dict(&self) -> Result<std::collections::BTreeMap<ByteString, Self>, ParseError> {
+    pub fn as_dict(&self) -> Result<&std::collections::BTreeMap<ByteString, Self>, ParseError> {
         if let BencodeValue::Dict(dict) = self {
-            Ok(dict.clone())
+            Ok(dict)
         } else {
             Err(ParseError::TypeMismatch {
                 expected: "dict",
@@ -260,25 +270,14 @@ pub fn parse_value(input: &[u8]) -> Result<(BencodeValue, &[u8]), ParseError> {
             }
 
             if !keys.is_sorted() {
-                // println!(
-                //     "keys: {:?}",
-                //     keys.iter()
-                //         .map(|bytes| String::from_utf8_lossy(bytes).to_string())
-                //         .collect::<Vec<String>>()
-                // );
-                println!("{:#?}", BencodeValue::Dict(kv).convert().to_string());
+                println!(
+                    "{:#?}",
+                    BencodeValue::Dict(kv).convert_to_serde().to_string()
+                );
                 Err(ParseError::UnsortedKeys)
             } else {
-                // println!(
-                //     "keys: {:?}",
-                //     keys.iter()
-                //         .map(|bytes| String::from_utf8_lossy(bytes).to_string())
-                //         .collect::<Vec<String>>()
-                // );
                 Ok((BencodeValue::Dict(kv), rest))
             }
-
-            //Ok((BencodeValue::Dict(kv), rest))
         }
 
         other => Err(ParseError::UnknownType(*other as char)),
@@ -315,7 +314,6 @@ pub fn encode(val: &BencodeValue) -> Vec<u8> {
     }
 }
 
-#[allow(dead_code)]
 pub fn decode(input: &[u8]) -> Result<BencodeValue, ParseError> {
     parse_value(input).map(|x| x.0)
 }

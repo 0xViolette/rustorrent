@@ -35,6 +35,8 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Torrent> {
     let parsed = bencode::BencodeValue::from_bytes(bytes).context("failed to parse bencode")?;
     let dict = parsed.as_dict().context("top-level value is not a dict")?;
 
+    println!("dict: {:?}", parsed);
+
     let announce = dict
         .get(&b"announce"[..])
         .context("missing 'announce' key")?
@@ -52,6 +54,7 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Torrent> {
         .context("missing 'length' key in info")?
         .as_integer()
         .context("'length' is not an integer")?
+        .clone()
         .try_into()
         .context("'length' is negative")?;
 
@@ -66,6 +69,7 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Torrent> {
         .context("missing 'piece length' key in info")?
         .as_integer()
         .context("'piece length' is not an integer")?
+        .clone()
         .try_into()
         .context("'piece length' is negative")?;
 
@@ -85,13 +89,13 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Torrent> {
         .collect();
 
     Ok(Torrent {
-        announce: String::from_utf8(announce).context("'announce' is not valid UTF-8")?,
+        announce: String::from_utf8(announce.clone()).context("'announce' is not valid UTF-8")?,
         info: Info {
             length,
-            name: String::from_utf8(name).context("'name' is not valid UTF-8")?,
+            name: String::from_utf8(name.clone()).context("'name' is not valid UTF-8")?,
             piece_length,
             pieces,
-            hash: Sha1::digest(bencode::encode(&BencodeValue::Dict(info))).to_vec(),
+            hash: Sha1::digest(bencode::encode(&BencodeValue::Dict(info.clone()))).to_vec(),
         },
     })
 }
@@ -155,6 +159,7 @@ impl Torrent {
                 .get(&b"interval"[..])
                 .ok_or(anyhow::anyhow!("`interval` key not found in dictionary"))?
                 .as_integer()?
+                .clone()
                 .try_into()?;
 
             let peers = decoded_resp

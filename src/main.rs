@@ -5,11 +5,6 @@ use std::env;
 
 use anyhow::{Context, Result};
 
-fn decode_bencoded_value(encoded_value: &[u8]) -> Result<serde_json::Value> {
-    let (val, _) = bencode::parse_value(encoded_value).context("failed to parse bencode")?;
-    Ok(val.convert())
-}
-
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
 
@@ -22,8 +17,8 @@ fn main() -> Result<()> {
         let encoded_value = args
             .get(2)
             .context("usage: rustorrent decode <encoded_value>")?;
-        let decoded_value = decode_bencoded_value(encoded_value.as_bytes())?;
-        println!("{}", decoded_value);
+        let decoded_value = bencode::decode(encoded_value.as_bytes())?;
+        println!("{:?}", decoded_value);
     } else if command == "info" {
         eprintln!("Logs:");
         let filename = args.get(2).context("usage: rustorrent info <filename>")?;
