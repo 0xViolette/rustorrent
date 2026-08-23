@@ -17,7 +17,7 @@ fn main() -> Result<()> {
         let encoded_value = args
             .get(2)
             .context("usage: rustorrent decode <encoded_value>")?;
-        let decoded_value = bencode::decode(encoded_value.as_bytes())?;
+        let decoded_value = bencode::parse(encoded_value.as_bytes())?;
         println!("{:?}", decoded_value);
     } else if command == "info" {
         eprintln!("Logs:");
@@ -33,7 +33,7 @@ fn main() -> Result<()> {
         let parsed_torrent =
             torrent::from_bytes(&torrent_file).context("failed to parse torrent file")?;
         parsed_torrent
-            .get_peers_from_tracker()
+            .discover_peers()
             .context("failed to get peers from tracker")?
             .peers
             .iter()

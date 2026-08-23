@@ -32,7 +32,7 @@ impl fmt::Debug for Torrent {
 }
 
 pub fn from_bytes(bytes: &[u8]) -> Result<Torrent> {
-    let parsed = bencode::BencodeValue::from_bytes(bytes).context("failed to parse bencode")?;
+    let parsed = bencode::parse(bytes).context("failed to parse bencode")?;
     let dict = parsed.as_dict().context("top-level value is not a dict")?;
 
     let announce = dict
@@ -130,7 +130,7 @@ impl<'a> TrackerRequest<'a> {
 }
 
 impl Torrent {
-    pub fn get_peers_from_tracker(&self) -> Result<TrackerResponse> {
+    pub fn discover_peers(&self) -> Result<TrackerResponse> {
         let peer_id = b"\x19\x01\xees\xbd?\xed\x81\x82Vw\xcb\x94\xdd\x87(\x05\xe9\xa2G";
         let req_params = TrackerRequest {
             info_hash: &self.info.hash,
@@ -150,8 +150,8 @@ impl Torrent {
             .bytes()
             .context("failed to read tracker response")?;
 
-        if let (BencodeValue::Dict(decoded_resp), _) =
-            bencode::parse_value(&resp).context("failed to parse tracker response")?
+        if let BencodeValue::Dict(decoded_resp) =
+            bencode::parse(&resp).context("failed to parse tracker response")?
         {
             let interval: usize = decoded_resp
                 .get(&b"interval"[..])

@@ -79,14 +79,6 @@ impl BencodeValue {
         }
     }
 
-    pub fn from_bytes(input: &[u8]) -> Result<Self, ParseError> {
-        let (value, remainder) = parse_value(input)?;
-        if !remainder.is_empty() {
-            return Err(ParseError::TrailingData);
-        }
-        Ok(value)
-    }
-
     pub fn as_integer(&self) -> Result<&i64, ParseError> {
         if let BencodeValue::Integer(x) = self {
             Ok(x)
@@ -164,7 +156,16 @@ fn parse_integer(input: &[u8]) -> Option<i64> {
     }
 }
 
-pub fn parse_value(input: &[u8]) -> Result<(BencodeValue, &[u8]), ParseError> {
+pub fn parse(input: &[u8]) -> Result<BencodeValue, ParseError> {
+    parse_value(input).and_then(|(value, remainder)| {
+        remainder
+            .is_empty()
+            .then_some(value)
+            .ok_or(ParseError::TrailingData)
+    })
+}
+
+fn parse_value(input: &[u8]) -> Result<(BencodeValue, &[u8]), ParseError> {
     match input.iter().next().ok_or(ParseError::UnexpectedEof)? {
         b'0'..=b'9' => {
             let colon_idx = input
@@ -312,8 +313,4 @@ pub fn encode(val: &BencodeValue) -> Vec<u8> {
             result
         }
     }
-}
-
-pub fn decode(input: &[u8]) -> Result<BencodeValue, ParseError> {
-    parse_value(input).map(|x| x.0)
 }
