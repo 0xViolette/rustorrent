@@ -1,9 +1,19 @@
 use anyhow::{Context, Result};
 use reqwest::{self, Url};
 use sha1::{Digest, Sha1};
-use std::{fmt, net::SocketAddrV4};
+use std::{
+    fmt,
+    io::{Read, Write},
+    net::SocketAddrV4,
+};
 
-use crate::bencode::{self, BencodeValue};
+const PROTOCOL_STR: &[u8] = b"BitTorrent protocol";
+const PROTOCOL_LEN: u8 = 19;
+const HANDSHAKE_SIZE: usize = 1 + 19 + 8 + 20 + 20; // = 69
+const RESERVED_BYTES: &[u8; 8] = &[0u8; 8];
+const PEER_ID: &[u8; 20] = b"\x19\x01\xees\xbd?\xed\x81\x82Vw\xcb\x94\xdd\x87(\x05\xe9\xa2G";
+
+use crate::bcode::{self, BencodeValue};
 
 pub struct Torrent {
     pub announce: String,
@@ -32,23 +42,23 @@ impl fmt::Debug for Torrent {
 }
 
 pub fn from_bytes(bytes: &[u8]) -> Result<Torrent> {
-    let parsed = bencode::parse(bytes).context("failed to parse bencode")?;
+    let parsed = bcode::parse(bytes).context("failed to parse bencode")?;
     let dict = parsed.as_dict().context("top-level value is not a dict")?;
 
     let announce = dict
-        .get(&b"announce"[..])
+        .get("announce")
         .context("missing 'announce' key")?
         .as_byte_string()
         .context("'announce' is not a byte string")?;
 
     let info = dict
-        .get(&b"info"[..])
+        .get("info")
         .context("missing 'info' key")?
         .as_dict()
         .context("'info' is not a dict")?;
 
     let length: usize = info
-        .get(&b"length"[..])
+        .get("length")
         .context("missing 'length' key in info")?
         .as_integer()
         .context("'length' is not an integer")?
@@ -57,13 +67,13 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Torrent> {
         .context("'length' is negative")?;
 
     let name = info
-        .get(&b"name"[..])
+        .get("name")
         .context("missing 'name' key in info")?
         .as_byte_string()
         .context("'name' is not a byte string")?;
 
     let piece_length: usize = info
-        .get(&b"piece length"[..])
+        .get("piece length")
         .context("missing 'piece length' key in info")?
         .as_integer()
         .context("'piece length' is not an integer")?
@@ -72,7 +82,7 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Torrent> {
         .context("'piece length' is negative")?;
 
     let pieces: Vec<String> = info
-        .get(&b"pieces"[..])
+        .get("pieces")
         .context("missing 'pieces' key in info")?
         .as_byte_string()
         .context("'pieces' is not a byte string")?
@@ -87,13 +97,13 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Torrent> {
         .collect();
 
     Ok(Torrent {
-        announce: String::from_utf8(announce.clone()).context("'announce' is not valid UTF-8")?,
+        announce: announce.to_string(), //.context("'announce' is not valid UTF-8")?,
         info: Info {
             length,
-            name: String::from_utf8(name.clone()).context("'name' is not valid UTF-8")?,
+            name: name.to_string(), //.context("'name' is not valid UTF-8")?,
             piece_length,
             pieces,
-            hash: Sha1::digest(bencode::encode(&BencodeValue::Dict(info.clone()))).to_vec(),
+            hash: Sha1::digest(bcode::encode(&BencodeValue::Dict(info.clone()))).to_vec(),
         },
     })
 }
@@ -131,10 +141,9 @@ impl<'a> TrackerRequest<'a> {
 
 impl Torrent {
     pub fn discover_peers(&self) -> Result<TrackerResponse> {
-        let peer_id = b"\x19\x01\xees\xbd?\xed\x81\x82Vw\xcb\x94\xdd\x87(\x05\xe9\xa2G";
         let req_params = TrackerRequest {
             info_hash: &self.info.hash,
-            peer_id,
+            peer_id: PEER_ID,
             uploaded: 0,
             downloaded: 0,
             left: self.info.length,
@@ -151,7 +160,7 @@ impl Torrent {
             .context("failed to read tracker response")?;
 
         if let BencodeValue::Dict(decoded_resp) =
-            bencode::parse(&resp).context("failed to parse tracker response")?
+            bcode::parse(&resp).context("failed to parse tracker response")?
         {
             let interval: usize = decoded_resp
                 .get(&b"interval"[..])
@@ -178,5 +187,24 @@ impl Torrent {
         } else {
             anyhow::bail!("Expected response to be a bencoded dictionary");
         }
+    }
+
+    pub fn peer_handshake(&self, peer_addr: &std::net::SocketAddrV4) -> Result<String> {
+        let infohash = self.info.hash.as_slice();
+        let mut message: Vec<u8> = vec![];
+        message.push(PROTOCOL_LEN);
+        message.extend_from_slice(PROTOCOL_STR);
+        message.extend_from_slice(RESERVED_BYTES);
+        message.extend_from_slice(infohash);
+        message.extend_from_slice(PEER_ID);
+
+        let mut stream = std::net::TcpStream::connect(peer_addr)?;
+        stream.write(&message)?;
+
+        let mut response = [0u8; HANDSHAKE_SIZE];
+        stream.read(&mut response)?;
+        println!("{}", response[0]);
+
+        Ok(hex::encode(&response[response.len() - 20..]))
     }
 }
