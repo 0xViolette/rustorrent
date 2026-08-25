@@ -1,4 +1,4 @@
-mod bcode;
+mod bencode;
 mod torrent;
 
 use std::env;
@@ -17,7 +17,7 @@ fn main() -> Result<()> {
         let encoded_value = args
             .get(2)
             .context("usage: rustorrent decode <encoded_value>")?;
-        let decoded_value = bcode::parse(encoded_value.as_bytes())?;
+        let decoded_value = bencode::decode(encoded_value.as_bytes())?;
         println!("{:?}", decoded_value);
     } else if command == "info" {
         eprintln!("Logs:");
@@ -53,8 +53,7 @@ fn main() -> Result<()> {
         let parsed_torrent =
             torrent::from_bytes(&torrent_file).context("failed to parse torrent file")?;
 
-        let peer_id = parsed_torrent.peer_handshake(&peer_addr)?;
-        println!("Peer ID: {}", peer_id);
+        println!("Peer ID: {}", parsed_torrent.get_peer_id(&peer_addr)?);
     } else {
         anyhow::bail!("unknown command: {command}\nusage: rustorrent <decode|info|peers> <input>");
     }

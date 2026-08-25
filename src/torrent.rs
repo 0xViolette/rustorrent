@@ -1,19 +1,12 @@
 use anyhow::{Context, Result};
 use reqwest::{self, Url};
 use sha1::{Digest, Sha1};
-use std::{
-    fmt,
-    io::{Read, Write},
-    net::SocketAddrV4,
-};
+use std::{fmt, net::SocketAddrV4};
 
-const PROTOCOL_STR: &[u8] = b"BitTorrent protocol";
-const PROTOCOL_LEN: u8 = 19;
-const HANDSHAKE_SIZE: usize = 1 + 19 + 8 + 20 + 20; // = 69
-const RESERVED_BYTES: &[u8; 8] = &[0u8; 8];
 const PEER_ID: &[u8; 20] = b"\x19\x01\xees\xbd?\xed\x81\x82Vw\xcb\x94\xdd\x87(\x05\xe9\xa2G";
 
-use crate::bcode::{self, BencodeValue};
+use crate::bencode;
+use bencode::BencodeValue;
 
 pub struct Torrent {
     pub announce: String,
@@ -26,7 +19,7 @@ pub struct Info {
     pub name: String,
     pub piece_length: usize,
     pub pieces: Vec<String>,
-    pub hash: Vec<u8>,
+    pub hash: [u8; 20],
 }
 
 impl fmt::Debug for Torrent {
@@ -42,23 +35,23 @@ impl fmt::Debug for Torrent {
 }
 
 pub fn from_bytes(bytes: &[u8]) -> Result<Torrent> {
-    let parsed = bcode::parse(bytes).context("failed to parse bencode")?;
+    let parsed = bencode::decode(bytes).context("failed to parse bencode")?;
     let dict = parsed.as_dict().context("top-level value is not a dict")?;
 
     let announce = dict
-        .get("announce")
+        .get("announce".as_bytes())
         .context("missing 'announce' key")?
-        .as_byte_string()
+        .as_bytes()
         .context("'announce' is not a byte string")?;
 
     let info = dict
-        .get("info")
+        .get("info".as_bytes())
         .context("missing 'info' key")?
         .as_dict()
         .context("'info' is not a dict")?;
 
     let length: usize = info
-        .get("length")
+        .get("length".as_bytes())
         .context("missing 'length' key in info")?
         .as_integer()
         .context("'length' is not an integer")?
@@ -67,13 +60,13 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Torrent> {
         .context("'length' is negative")?;
 
     let name = info
-        .get("name")
+        .get("name".as_bytes())
         .context("missing 'name' key in info")?
-        .as_byte_string()
+        .as_bytes()
         .context("'name' is not a byte string")?;
 
     let piece_length: usize = info
-        .get("piece length")
+        .get("piece length".as_bytes())
         .context("missing 'piece length' key in info")?
         .as_integer()
         .context("'piece length' is not an integer")?
@@ -82,9 +75,9 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Torrent> {
         .context("'piece length' is negative")?;
 
     let pieces: Vec<String> = info
-        .get("pieces")
+        .get("pieces".as_bytes())
         .context("missing 'pieces' key in info")?
-        .as_byte_string()
+        .as_bytes()
         .context("'pieces' is not a byte string")?
         .chunks(20)
         .map(|x| {
@@ -97,13 +90,13 @@ pub fn from_bytes(bytes: &[u8]) -> Result<Torrent> {
         .collect();
 
     Ok(Torrent {
-        announce: announce.to_string(), //.context("'announce' is not valid UTF-8")?,
+        announce: String::from_utf8_lossy(announce).into_owned(),
         info: Info {
             length,
-            name: name.to_string(), //.context("'name' is not valid UTF-8")?,
+            name: String::from_utf8_lossy(name).into_owned(),
             piece_length,
             pieces,
-            hash: Sha1::digest(bcode::encode(&BencodeValue::Dict(info.clone()))).to_vec(),
+            hash: Sha1::digest(bencode::encode(&BencodeValue::Dict(info.clone()))).into(),
         },
     })
 }
@@ -159,8 +152,12 @@ impl Torrent {
             .bytes()
             .context("failed to read tracker response")?;
 
-        if let BencodeValue::Dict(decoded_resp) =
-            bcode::parse(&resp).context("failed to parse tracker response")?
+        if let BencodeValue::Dict(decoded_resp) = bencode::decode(&resp)
+            .and_then(|x| {
+                println!("{:?}", x);
+                Ok(x)
+            })
+            .context("failed to parse tracker response")?
         {
             let interval: usize = decoded_resp
                 .get(&b"interval"[..])
@@ -170,9 +167,9 @@ impl Torrent {
                 .try_into()?;
 
             let peers = decoded_resp
-                .get(&b"peers"[..])
+                .get("peers".as_bytes())
                 .ok_or(anyhow::anyhow!("`peers` key not found in dictionary"))?
-                .as_byte_string()?
+                .as_bytes()?
                 .chunks_exact(6)
                 .filter(|x| x.len() == 6)
                 .map(|x| {
@@ -189,22 +186,62 @@ impl Torrent {
         }
     }
 
-    pub fn peer_handshake(&self, peer_addr: &std::net::SocketAddrV4) -> Result<String> {
-        let infohash = self.info.hash.as_slice();
-        let mut message: Vec<u8> = vec![];
-        message.push(PROTOCOL_LEN);
-        message.extend_from_slice(PROTOCOL_STR);
-        message.extend_from_slice(RESERVED_BYTES);
-        message.extend_from_slice(infohash);
-        message.extend_from_slice(PEER_ID);
+    pub fn get_peer_id(&self, peer_addr: &SocketAddrV4) -> Result<String> {
+        Ok(hex::encode(peer::connect(self, peer_addr)?.id))
+    }
+}
 
-        let mut stream = std::net::TcpStream::connect(peer_addr)?;
-        stream.write(&message)?;
+mod peer {
+    use crate::torrent::{PEER_ID, Torrent};
+    use anyhow::{Context, Result};
+    use std::io::{Read, Write};
 
-        let mut response = [0u8; HANDSHAKE_SIZE];
-        stream.read(&mut response)?;
-        println!("{}", response[0]);
+    const PROTOCOL_LEN: u8 = 19;
+    const PROTOCOL_NAME: &[u8] = b"BitTorrent protocol";
+    const HANDSHAKE_SIZE: usize = 1 + 19 + 8 + 20 + 20; // = 68
 
-        Ok(hex::encode(&response[response.len() - 20..]))
+    pub struct Peer {
+        pub id: [u8; 20],
+        pub addr: std::net::SocketAddrV4,
+        pub conn: Option<std::net::TcpStream>,
+    }
+
+    struct PeerMessage<'a> {
+        length: u8,
+        kind: u8,
+        msg: &'a [u8],
+    }
+
+    pub fn connect(torrent: &Torrent, peer_addr: &std::net::SocketAddrV4) -> Result<Peer> {
+        let msg = build_handshake(&torrent.info.hash, PEER_ID);
+
+        let mut stream = std::net::TcpStream::connect(peer_addr)
+            .context("failed to establish connection with peer")?;
+
+        stream
+            .write_all(&msg)
+            .context("failed to send BitTorrent handshake with peer")?;
+
+        let mut response_msg = [0u8; 68];
+        stream
+            .read_exact(&mut response_msg)
+            .context("failed to recieve BitTorrent handshake with peer")?;
+
+        Ok(Peer {
+            id: response_msg[48..68].try_into().unwrap(),
+            addr: *peer_addr,
+            conn: Some(stream),
+        })
+    }
+
+    fn build_handshake(info_hash: &[u8; 20], peer_id: &[u8; 20]) -> [u8; 68] {
+        let mut msg = [0u8; HANDSHAKE_SIZE];
+        msg[0] = PROTOCOL_LEN;
+        msg[1..20].copy_from_slice(PROTOCOL_NAME);
+
+        msg[28..48].copy_from_slice(info_hash);
+        msg[48..68].copy_from_slice(peer_id);
+
+        msg
     }
 }
