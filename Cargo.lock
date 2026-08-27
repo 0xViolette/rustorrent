@@ -1004,6 +1004,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "thiserror",
+ "url",
  "urlencoding",
 ]
 

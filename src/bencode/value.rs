@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{collections::BTreeMap, fmt};
 use thiserror::Error;
 
 pub type ByteString = Vec<u8>;
@@ -82,9 +82,9 @@ impl BencodeValue {
         }
     }
 
-    pub fn as_integer(&self) -> Result<&i64, BencodeParseError> {
+    pub fn as_integer(&self) -> Result<i64, BencodeParseError> {
         if let BencodeValue::Integer(x) = self {
-            Ok(x)
+            Ok(*x)
         } else {
             Err(BencodeParseError::TypeMismatch {
                 expected: "integer",
@@ -116,9 +116,7 @@ impl BencodeValue {
         }
     }
 
-    pub fn as_dict(
-        &self,
-    ) -> Result<&std::collections::BTreeMap<ByteString, Self>, BencodeParseError> {
+    pub fn as_dict(&self) -> Result<&BTreeMap<ByteString, Self>, BencodeParseError> {
         if let BencodeValue::Dict(dict) = self {
             Ok(dict)
         } else {
