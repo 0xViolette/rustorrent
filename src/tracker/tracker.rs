@@ -2,7 +2,7 @@ use super::value::*;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use url::Url;
 
-use crate::{bencode, torrent::MetaInfo};
+use crate::{bencode, torrent::model::MetaInfo};
 
 pub fn build_request(torrent: &MetaInfo) -> TrackerRequest<'_> {
     TrackerRequest {

@@ -1,4 +1,4 @@
-use super::value::*;
+use super::model::*;
 
 pub fn encode(val: &BencodeValue) -> Vec<u8> {
     match val {
@@ -8,24 +8,17 @@ pub fn encode(val: &BencodeValue) -> Vec<u8> {
             v.extend(s);
             v
         }
-        BencodeValue::List(v) => {
-            let mut result: Vec<u8> = vec![];
-            result.push(b'l');
-            for x in v.iter() {
-                result.extend_from_slice(&encode(x));
-            }
-            result.push(b'e');
-            result
-        }
-        BencodeValue::Dict(d) => {
-            let mut result: Vec<u8> = vec![];
-            result.push(b'd');
-            for (k, v) in d {
-                result.extend_from_slice(&encode(&BencodeValue::ByteString(k.clone())));
-                result.extend_from_slice(&encode(v));
-            }
-            result.push(b'e');
-            result
-        }
+        BencodeValue::List(v) => std::iter::once(b'l')
+            .chain(v.iter().flat_map(|x| encode(x)))
+            .chain(std::iter::once(b'e'))
+            .collect(),
+        BencodeValue::Dict(d) => std::iter::once(b'd')
+            .chain(d.iter().flat_map(|(k, v)| {
+                encode(&BencodeValue::ByteString(k.clone()))
+                    .into_iter()
+                    .chain(encode(v))
+            }))
+            .chain(std::iter::once(b'e'))
+            .collect(),
     }
 }

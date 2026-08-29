@@ -10,7 +10,7 @@ pub struct Peer {
 pub struct PeerMessage {
     pub length: u32,
     pub kind: u8,
-    pub msg: Vec<u8>,
+    pub payload: Vec<u8>,
 }
 
 impl PeerMessage {
@@ -18,7 +18,7 @@ impl PeerMessage {
         Self {
             length: (1 + msg.len()) as u32,
             kind,
-            msg: msg.into(),
+            payload: msg.into(),
         }
     }
 
@@ -26,7 +26,7 @@ impl PeerMessage {
         let mut msg = Vec::with_capacity(4 + self.length as usize);
         msg.extend_from_slice(&self.length.to_be_bytes());
         msg.push(self.kind);
-        msg.extend_from_slice(&self.msg);
+        msg.extend_from_slice(&self.payload);
 
         msg
     }
@@ -38,4 +38,6 @@ pub enum PeerError {
     Tcp(#[from] std::io::Error),
     #[error("No Connection: {0}")]
     NoConnection(String),
+    #[error("Peer sent invalid piece")]
+    InvalidPiece,
 }

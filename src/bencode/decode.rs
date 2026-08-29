@@ -1,4 +1,4 @@
-use super::value::*;
+use super::model::*;
 
 pub fn decode(input: &[u8]) -> Result<BencodeValue, BencodeParseError> {
     parse_value(input).and_then(|(value, remainder)| {

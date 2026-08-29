@@ -1,4 +1,3 @@
-pub mod client;
-pub mod value;
+pub mod model;
 
-pub use value::MetaInfo;
+pub use model::{Info, MetaInfo, MetaInfoParseError};

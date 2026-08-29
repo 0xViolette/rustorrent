@@ -1,57 +1,86 @@
-use crate::bencode::{self, BencodeValue};
+use crate::{
+    bencode,
+    bencode::model::{BencodeParseError, BencodeValue},
+};
 use sha1::{Digest, Sha1};
 use std::fmt;
 use thiserror::Error;
+
+pub struct Torrent {
+    pub meta_info: MetaInfo,
+    pub uploaded: usize,
+    pub downloaded: usize,
+    pub left: usize,
+}
 
 pub struct MetaInfo {
     pub announce: String,
     pub info: Info,
 }
 
+pub struct Info {
+    pub length: usize,
+    pub name: String,
+    pub piece_length: usize,
+    pub pieces: Vec<[u8; 20]>,
+    pub hash: [u8; 20],
+}
+
+#[derive(Debug, Error)]
+pub enum MetaInfoParseError {
+    #[error("bencode error: {0}")]
+    Bencode(#[from] BencodeParseError),
+    #[error("missing key: {0}")]
+    MissingKey(String),
+    #[error("invalid value: {0}")]
+    InvalidValue(String),
+}
+
 impl MetaInfo {
-    pub fn from_bytes(bytes: &[u8]) -> Result<MetaInfo, TorrentError> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<MetaInfo, MetaInfoParseError> {
         let parsed = bencode::decode(bytes)?;
         let dict = parsed.as_dict()?;
 
         let announce = dict
             .get("announce".as_bytes())
-            .ok_or(TorrentError::MissingKey("announce".into()))?
+            .ok_or(MetaInfoParseError::MissingKey("announce".into()))?
             .as_bytes()?;
 
         let info = dict
             .get("info".as_bytes())
-            .ok_or(TorrentError::MissingKey("info".into()))?
+            .ok_or(MetaInfoParseError::MissingKey("info".into()))?
             .as_dict()?;
 
         let length: usize = info
             .get("length".as_bytes())
-            .ok_or(TorrentError::MissingKey("length".into()))?
+            .ok_or(MetaInfoParseError::MissingKey("length".into()))?
             .as_integer()?
             .try_into()
-            .map_err(|_| TorrentError::InvalidValue("'length' is negative".into()))?;
+            .map_err(|_| MetaInfoParseError::InvalidValue("'length' is negative".into()))?;
 
         let name = info
             .get("name".as_bytes())
-            .ok_or(TorrentError::MissingKey("name".into()))?
+            .ok_or(MetaInfoParseError::MissingKey("name".into()))?
             .as_bytes()?;
 
         let piece_length: usize = info
             .get("piece length".as_bytes())
-            .ok_or(TorrentError::MissingKey("piece length".into()))?
+            .ok_or(MetaInfoParseError::MissingKey("piece length".into()))?
             .as_integer()?
             .try_into()
-            .map_err(|_| TorrentError::InvalidValue("'piece length' is negative".into()))?;
+            .map_err(|_| MetaInfoParseError::InvalidValue("'piece length' is negative".into()))?;
 
         let pieces: Vec<[u8; 20]> = info
             .get("pieces".as_bytes())
-            .ok_or(TorrentError::MissingKey("pieces".into()))?
+            .ok_or(MetaInfoParseError::MissingKey("pieces".into()))?
             .as_bytes()?
             .chunks(20)
             .map(|x| {
-                x.try_into()
-                    .map_err(|_| TorrentError::InvalidValue("pieces is not multiple of 20".into()))
+                x.try_into().map_err(|_| {
+                    MetaInfoParseError::InvalidValue("pieces is not multiple of 20".into())
+                })
             })
-            .collect::<Result<Vec<[u8; 20]>, TorrentError>>()?;
+            .collect::<Result<Vec<[u8; 20]>, MetaInfoParseError>>()?;
 
         Ok(MetaInfo {
             announce: String::from_utf8_lossy(announce).into_owned(),
@@ -84,23 +113,4 @@ impl fmt::Debug for MetaInfo {
             )
             .finish()
     }
-}
-
-#[derive(Debug, Error)]
-pub enum TorrentError {
-    #[error("bencode error: {0}")]
-    Bencode(#[from] crate::bencode::value::BencodeParseError),
-    #[error("missing key: {0}")]
-    MissingKey(String),
-    #[error("invalid value: {0}")]
-    InvalidValue(String),
-}
-
-pub struct Info {
-    pub length: usize,
-    #[allow(unused)]
-    pub name: String,
-    pub piece_length: usize,
-    pub pieces: Vec<[u8; 20]>,
-    pub hash: [u8; 20],
 }

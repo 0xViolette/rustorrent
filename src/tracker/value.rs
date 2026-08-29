@@ -1,3 +1,4 @@
+use crate::bencode::model::BencodeParseError;
 use thiserror::{self, Error};
 use urlencoding;
 
@@ -8,7 +9,7 @@ pub enum TrackerError {
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
     #[error("bencode error: {0}")]
-    Bencode(#[from] crate::bencode::value::BencodeParseError),
+    Bencode(#[from] BencodeParseError),
     #[error("invalid response: {0}")]
     InvalidResponse(String),
 }
