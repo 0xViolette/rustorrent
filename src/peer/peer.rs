@@ -1,6 +1,5 @@
 use crate::torrent::model::MetaInfo;
 use crate::{peer::value::*, tracker};
-use sha1::{Digest, Sha1};
 use std::{
     io::{Read, Write},
     net::SocketAddrV4,
@@ -9,6 +8,8 @@ use std::{
 const PROTOCOL_LEN: u8 = 19;
 const PROTOCOL_NAME: &[u8] = b"BitTorrent protocol";
 const HANDSHAKE_SIZE: usize = 1 + 19 + 8 + 20 + 20; // = 68
+
+const BLOCK_SIZE: u32 = 1 << 14;
 
 pub fn connect(torrent: &MetaInfo, peer_addr: &std::net::SocketAddrV4) -> Result<Peer, PeerError> {
     let msg = build_handshake(&torrent.info.hash, tracker::PEER_ID);
@@ -24,6 +25,7 @@ pub fn connect(torrent: &MetaInfo, peer_addr: &std::net::SocketAddrV4) -> Result
         id: response_msg[48..68].try_into().unwrap(),
         addr: *peer_addr,
         conn: stream,
+        active: false,
     })
 }
 
@@ -45,26 +47,39 @@ impl Peer {
         Ok(())
     }
 
-    pub fn recieve(&mut self) -> Result<PeerMessage, PeerError> {
+    pub fn receive(&mut self) -> Result<PeerMessage, PeerError> {
+        println!("reading length");
+
         let mut length_bytes = [0u8; 4];
         self.conn.read_exact(&mut length_bytes)?;
+
         let length = u32::from_be_bytes(length_bytes);
+
+        println!("got length: {length}");
+
+        if length == 0 {
+            return Ok(PeerMessage::KeepAlive);
+        }
+
+        println!("reading kind");
 
         let mut kind_byte = [0u8; 1];
         self.conn.read_exact(&mut kind_byte)?;
-        let kind = u8::from_be_bytes(kind_byte);
 
-        if length == 0 {
-            panic!("peer message prefix length is 0");
-        }
+        let kind = kind_byte[0].try_into()?;
 
-        if length == 1 {
-            Ok(PeerMessage::new(kind, &[]))
-        } else {
-            let mut msg_bytes = vec![0; length as usize - 1];
-            self.conn.read_exact(&mut msg_bytes)?;
-            Ok(PeerMessage::new(kind, &msg_bytes))
-        }
+        println!("got kind: {:?}", kind);
+
+        println!("reading {} payload bytes", length - 1);
+
+        let mut payload = vec![0; length as usize - 1];
+        self.conn.read_exact(&mut payload)?;
+
+        Ok(PeerMessage::Message {
+            length,
+            kind,
+            payload,
+        })
     }
 }
 
@@ -78,60 +93,99 @@ pub fn download_piece(
     piece_index: u32,
 ) -> Result<Vec<u8>, PeerError> {
     // recieve bitfield message
-    let _bitfield = peer.recieve()?;
+    // if !peer.active {
+    //     let bitfield = peer.recieve()?;
+    //     assert_eq!(bitfield.kind, PeerMessageType::Bitfield);
+    //     println!("bitfield recieved");
+    //     peer.active = true;
+    // }
 
     // send interested
-    peer.send(&PeerMessage::new(2, &[]))?;
+    println!("sending interested");
+    peer.send(&PeerMessage::new(PeerMessageType::Interested, &[]))?;
 
-    // recieve unchoke msg
-    let _unchoke_msg = peer.recieve()?;
+    // loop until unchoke
+    println!("waiting for unchoke");
+    loop {
+        match peer.receive()? {
+            PeerMessage::Message {
+                kind: PeerMessageType::Have,
+                payload,
+                ..
+            } => {
+                let index = u32::from_be_bytes(payload.as_slice().try_into().unwrap());
+
+                println!("peer has piece {index}");
+            }
+
+            PeerMessage::Message {
+                kind: PeerMessageType::Unchoke,
+                ..
+            } => {
+                println!("got unchoke");
+                break;
+            }
+
+            PeerMessage::Message { kind, .. } => {
+                println!("got message: {:?}", kind);
+            }
+
+            PeerMessage::KeepAlive => {}
+        }
+    }
+
+    println!("starting piece requests");
 
     // send request
 
-    let piece_length = if piece_index == (torrent.info.pieces.len() as u32 - 1) {
-        (torrent.info.length - torrent.info.piece_length * (torrent.info.pieces.len() - 1)) as u32
-    } else {
-        torrent.info.piece_length as u32
-    };
+    let piece_length = std::cmp::min(
+        torrent.info.piece_length,
+        torrent.info.length - torrent.info.piece_length * piece_index as usize,
+    ) as u32;
 
-    let ideal_block_length = 2u32.pow(14);
-    let num_blocks = if piece_length % ideal_block_length != 0 {
-        piece_length / ideal_block_length + 1
-    } else {
-        piece_length / ideal_block_length
-    };
+    let num_blocks = piece_length.div_ceil(BLOCK_SIZE);
 
-    let index = piece_index.to_be_bytes();
     let mut piece = vec![];
     for i in 0..num_blocks {
-        let begin = (ideal_block_length * i).to_be_bytes();
+        let begin = BLOCK_SIZE * i;
 
-        let length = if i < num_blocks - 1 {
-            ideal_block_length
-        } else {
-            piece_length - ideal_block_length * (num_blocks - 1)
-        }
-        .to_be_bytes();
+        let length = (piece_length - begin).min(BLOCK_SIZE);
 
-        let mut payload = vec![];
-        payload.extend_from_slice(&index);
-        payload.extend_from_slice(&begin);
-        payload.extend_from_slice(&length);
+        let payload = [
+            piece_index.to_be_bytes(),
+            begin.to_be_bytes(),
+            length.to_be_bytes(),
+        ]
+        .concat();
 
-        peer.send(&PeerMessage::new(6, &payload))?;
+        let request = PeerMessage::new(PeerMessageType::Request, &payload);
+
+        println!("request: {:02x?}", request.as_bytes());
+
+        peer.send(&request)?;
 
         // recieve piece
-        let piece_msg = peer.recieve()?;
-        piece.extend(&piece_msg.payload[8..]);
-    }
-    let actual_hash: [u8; 20] = Sha1::digest(&piece).into();
-    let expected_hash = torrent.info.pieces[piece_index as usize];
+        let piece_msg = loop {
+            match peer.receive()? {
+                PeerMessage::Message {
+                    kind: PeerMessageType::Piece,
+                    ..
+                } => break payload,
 
-    if actual_hash == expected_hash {
-        Ok(piece)
-    } else {
-        Err(PeerError::InvalidPiece)
+                PeerMessage::KeepAlive => continue,
+
+                _ => continue,
+            }
+        };
+
+        piece.extend_from_slice(&piece_msg);
     }
+
+    if !torrent.verify_piece(&piece, piece_index as usize) {
+        return Err(PeerError::InvalidPiece);
+    }
+
+    Ok(piece)
 }
 
 pub fn download(torrent: &MetaInfo) -> Result<Vec<u8>, PeerError> {
@@ -140,16 +194,21 @@ pub fn download(torrent: &MetaInfo) -> Result<Vec<u8>, PeerError> {
         .peers;
 
     let mut full = vec![];
-    let mut peer1 = connect(torrent, &peer_addrs[0])?;
-    let mut peer2 = connect(torrent, &peer_addrs[1])?;
-    let mut peer3 = connect(torrent, &peer_addrs[2])?;
-    let mut peers = [&mut peer1, &mut peer2, &mut peer3];
+    let mut peers: Vec<Peer> = peer_addrs
+        .iter()
+        .map(|x| connect(torrent, x))
+        .collect::<Result<Vec<_>, _>>()?;
+    let num_peers = peers.len();
+    println!("{num_peers}");
+    println!("{}", torrent.info.pieces.len());
     for piece_index in 0..torrent.info.pieces.len() {
-        full.extend(&download_piece(
+        let piece = download_piece(
             torrent,
-            &mut peers[piece_index],
+            &mut peers[piece_index.min(num_peers - 1)],
             piece_index as u32,
-        )?);
+        )?;
+        println!("downloaded {} piece", piece_index);
+        full.extend_from_slice(&piece);
     }
 
     Ok(full)

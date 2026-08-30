@@ -13,6 +13,17 @@ pub struct Torrent {
     pub left: usize,
 }
 
+impl Torrent {
+    pub fn new(bytes: &[u8]) -> Result<Self, MetaInfoParseError> {
+        Ok(Torrent {
+            meta_info: MetaInfo::from_bytes(bytes)?,
+            uploaded: 0,
+            downloaded: 0,
+            left: 0,
+        })
+    }
+}
+
 pub struct MetaInfo {
     pub announce: String,
     pub info: Info,
@@ -92,6 +103,13 @@ impl MetaInfo {
                 hash: Sha1::digest(bencode::encode(&BencodeValue::Dict(info.clone()))).into(),
             },
         })
+    }
+
+    pub fn verify_piece(&self, piece: &[u8], piece_index: usize) -> bool {
+        let actual_hash: [u8; 20] = Sha1::digest(piece).into();
+        let expected_hash = self.info.pieces[piece_index];
+
+        actual_hash == expected_hash
     }
 }
 

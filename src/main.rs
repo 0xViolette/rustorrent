@@ -1,6 +1,8 @@
+use ::rustorrent::{bencode, peer, torrent, tracker};
 use clap::{Parser, Subcommand};
-use rustorrent::{bencode, peer, torrent, tracker};
+use rustorrent::rustorrent;
 use std::net::SocketAddrV4;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
@@ -18,30 +20,30 @@ enum Command {
     },
 
     Info {
-        filename: String,
+        filename: PathBuf,
     },
 
     Peers {
-        filename: String,
+        filename: PathBuf,
     },
 
     Handshake {
-        filename: String,
+        filename: PathBuf,
         peer_addr: SocketAddrV4,
     },
 
     #[command(name = "download_piece")]
     DownloadPiece {
-        filename: String,
+        filename: PathBuf,
         peer_addr: SocketAddrV4,
         piece_index: u32,
     },
 
     Download {
-        filename: String,
+        filename: PathBuf,
 
         #[arg(short, long)]
-        output: String,
+        output: PathBuf,
     },
 }
 
@@ -55,15 +57,15 @@ fn main() -> Result<()> {
         }
 
         Command::Info { filename } => {
-            let torrent_file =
-                std::fs::read(&filename).context(format!("failed to read {filename}"))?;
+            let torrent_file = std::fs::read(&filename)
+                .context(format!("failed to read {}", filename.display()))?;
             let parsed_torrent = torrent::MetaInfo::from_bytes(&torrent_file)
                 .context("failed to parse torrent file")?;
             println!("{:#?}", parsed_torrent);
         }
         Command::Peers { filename } => {
-            let torrent_file =
-                std::fs::read(&filename).context(format!("failed to read {filename}"))?;
+            let torrent_file = std::fs::read(&filename)
+                .context(format!("failed to read {}", filename.display()))?;
             let parsed_torrent = torrent::MetaInfo::from_bytes(&torrent_file)
                 .context("failed to parse torrent file")?;
 
@@ -78,8 +80,8 @@ fn main() -> Result<()> {
             filename,
             peer_addr,
         } => {
-            let torrent_file =
-                std::fs::read(&filename).context(format!("failed to read {filename}"))?;
+            let torrent_file = std::fs::read(&filename)
+                .context(format!("failed to read {}", filename.display()))?;
             let parsed_torrent = torrent::MetaInfo::from_bytes(&torrent_file)
                 .context("failed to parse torrent file")?;
 
@@ -94,8 +96,8 @@ fn main() -> Result<()> {
             peer_addr,
             piece_index,
         } => {
-            let torrent_file =
-                std::fs::read(&filename).context(format!("failed to read {filename}"))?;
+            let torrent_file = std::fs::read(&filename)
+                .context(format!("failed to read {}", filename.display()))?;
             let parsed_torrent = torrent::MetaInfo::from_bytes(&torrent_file)
                 .context("failed to parse torrent file")?;
 
@@ -104,15 +106,9 @@ fn main() -> Result<()> {
         }
 
         Command::Download { filename, output } => {
-            let torrent_file =
-                std::fs::read(&filename).context(format!("failed to read {filename}"))?;
-            let parsed_torrent = torrent::MetaInfo::from_bytes(&torrent_file)
-                .context("failed to parse torrent file")?;
-
-            let content = peer::download(&parsed_torrent)?;
-            println!("downoaded successfully");
-
-            std::fs::write(output, content)?;
+            let client = rustorrent::Client::new(filename)?;
+            client.download(output).context("Failed to download")?;
+            println!("downloaded successfully");
         }
     }
 
